@@ -167,6 +167,13 @@ def create_mailbox(
             email_type=extra.get("luckmail_email_type", ""),
             domain=extra.get("luckmail_domain", ""),
         )
+    elif provider == "qqemail":
+        return QQEmailMailbox(
+            api_url=extra.get("qqemail_api_url") or "https://qqemail.eu.org",
+            username=extra.get("qqemail_username", ""),
+            password=extra.get("qqemail_password", ""),
+            domain=extra.get("qqemail_domain") or "qqemail.eu.org",
+        )
     else:  # laoudo
         return LaoudoMailbox(
             auth_token=extra.get("laoudo_auth", ""),
@@ -1690,6 +1697,100 @@ class FreemailMailbox(BaseMailbox):
                         str(msg.get("preview", "")) + " " + str(msg.get("subject", ""))
                     )
                     code = self._safe_extract(text, code_pattern)
+                    if code:
+                        return code
+            except Exception:
+                pass
+            time.sleep(3)
+        raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+
+
+class QQEmailMailbox(BaseMailbox):
+    """QQEmail (qqemail.eu.org) 临时邮箱服务"""
+
+    def __init__(self, api_url: str = "https://qqemail.eu.org",
+                 username: str = "", password: str = "",
+                 domain: str = "qqemail.eu.org", proxy: str = None):
+        self.api = api_url.rstrip("/")
+        self.username = username
+        self.password = password
+        self.domain = domain
+        self.proxy = {"http": proxy, "https": proxy} if proxy else None
+        self._session = None
+
+    def _ensure_session(self):
+        if self._session is not None:
+            return
+        import requests
+        s = requests.Session()
+        if self.proxy:
+            s.proxies = self.proxy
+        csrf_r = s.get(f"{self.api}/api/auth/csrf", timeout=10)
+        csrf = csrf_r.json().get("csrfToken", "")
+        r = s.post(
+            f"{self.api}/api/auth/callback/credentials",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data=f"username={self.username}&password={self.password}&csrfToken={csrf}&json=true",
+            allow_redirects=False,
+            timeout=15,
+        )
+        s.get(f"{self.api}/api/auth/session", timeout=10)
+        has_token = any("session-token" in c.name for c in s.cookies)
+        if has_token:
+            self._log("[QQEmail] 登录成功")
+        else:
+            self._log(f"[QQEmail] 登录失败: status={r.status_code}")
+            raise RuntimeError("QQEmail 登录失败，请检查 qqemail_username / qqemail_password 配置")
+        self._session = s
+
+    def get_email(self) -> MailboxAccount:
+        import random
+        import string
+        self._ensure_session()
+        name = "tmp" + "".join(random.choices(string.ascii_lowercase, k=5)) + "".join(random.choices(string.digits, k=4))
+        r = self._session.post(
+            f"{self.api}/api/emails/generate",
+            json={"name": name, "domain": self.domain, "expiryTime": 86400000},
+            timeout=15,
+        )
+        data = r.json()
+        email = data.get("email", "")
+        email_id = data.get("id", "")
+        self._log(f"[QQEmail] 生成邮箱: {email} id={email_id}")
+        if not email_id:
+            raise RuntimeError(f"QQEmail 生成邮箱失败: {data}")
+        return MailboxAccount(email=email, account_id=str(email_id))
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        try:
+            self._ensure_session()
+            r = self._session.get(f"{self.api}/api/emails/{account.account_id}", timeout=10)
+            return {str(m.get("id", "")) for m in r.json().get("messages", [])}
+        except Exception:
+            return set()
+
+    def wait_for_code(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None,
+                      code_pattern: str = None, **kwargs) -> str:
+        import re
+        import time
+        self._ensure_session()
+        seen = set(before_ids or [])
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                r = self._session.get(f"{self.api}/api/emails/{account.account_id}", timeout=10)
+                msgs = r.json().get("messages", [])
+                for msg in msgs:
+                    mid = str(msg.get("id", ""))
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    body = str(msg.get("content") or msg.get("text") or msg.get("body") or msg.get("html") or "") + " " + str(msg.get("subject") or "")
+                    body = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '', body)
+                    if keyword and keyword.lower() not in body.lower():
+                        continue
+                    code = self._safe_extract(body, code_pattern)
                     if code:
                         return code
             except Exception:

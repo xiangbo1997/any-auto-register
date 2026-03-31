@@ -68,6 +68,10 @@ export default function Register() {
         luckmail_api_key: cfg.luckmail_api_key || '',
         luckmail_email_type: cfg.luckmail_email_type || '',
         luckmail_domain: cfg.luckmail_domain || '',
+        qqemail_api_url: cfg.qqemail_api_url || 'https://qqemail.eu.org',
+        qqemail_username: cfg.qqemail_username || '',
+        qqemail_password: cfg.qqemail_password || '',
+        qqemail_domain: cfg.qqemail_domain || 'qqemail.eu.org',
       })
     })
   }, [form])
@@ -120,6 +124,10 @@ export default function Register() {
           luckmail_api_key: values.luckmail_api_key,
           luckmail_email_type: values.luckmail_email_type,
           luckmail_domain: values.luckmail_domain,
+          qqemail_api_url: values.qqemail_api_url,
+          qqemail_username: values.qqemail_username,
+          qqemail_password: values.qqemail_password,
+          qqemail_domain: values.qqemail_domain,
           yescaptcha_key: values.yescaptcha_key,
           solver_url: values.solver_url,
         },
@@ -229,6 +237,7 @@ export default function Register() {
                 { value: 'laoudo', label: 'Laoudo' },
                 { value: 'cfworker', label: 'CF Worker' },
                 { value: 'luckmail', label: 'LuckMail' },
+                { value: 'qqemail', label: 'QQEmail (qqemail.eu.org)' },
               ]}
             />
           </Form.Item>
@@ -316,6 +325,22 @@ export default function Register() {
               </Form.Item>
               <Form.Item name="luckmail_domain" label="邮箱域名（可选）">
                 <Input placeholder="outlook.com" />
+              </Form.Item>
+            </>
+          )}
+          {mailProvider === 'qqemail' && (
+            <>
+              <Form.Item name="qqemail_api_url" label="API URL">
+                <Input placeholder="https://qqemail.eu.org" />
+              </Form.Item>
+              <Form.Item name="qqemail_username" label="用户名">
+                <Input placeholder="zhangxb" />
+              </Form.Item>
+              <Form.Item name="qqemail_password" label="密码">
+                <Input.Password placeholder="密码" />
+              </Form.Item>
+              <Form.Item name="qqemail_domain" label="域名">
+                <Input placeholder="qqemail.eu.org" />
               </Form.Item>
             </>
           )}

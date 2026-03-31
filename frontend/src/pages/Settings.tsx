@@ -25,6 +25,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'Freemail（自建 CF Worker）', value: 'freemail' },
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
     { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
+    { label: 'QQEmail (qqemail.eu.org)', value: 'qqemail' },
   ],
   maliapi_auto_domain_strategy: [
     { label: 'balanced', value: 'balanced' },
@@ -151,6 +152,16 @@ const TAB_ITEMS = [
           { key: 'luckmail_api_key', label: 'API Key', secret: true },
           { key: 'luckmail_email_type', label: '邮箱类型（可选）', placeholder: 'ms_graph / ms_imap / self_built' },
           { key: 'luckmail_domain', label: '邮箱域名（可选）', placeholder: 'outlook.com / gmail.com' },
+        ],
+      },
+      {
+        title: 'QQEmail',
+        desc: 'QQEmail (qqemail.eu.org) 邮箱服务',
+        fields: [
+          { key: 'qqemail_api_url', label: 'API URL', placeholder: 'https://qqemail.eu.org' },
+          { key: 'qqemail_username', label: '用户名' },
+          { key: 'qqemail_password', label: '密码', secret: true },
+          { key: 'qqemail_domain', label: '域名', placeholder: 'qqemail.eu.org' },
         ],
       },
     ],
@@ -777,6 +788,12 @@ export default function Settings() {
       }
       if (!data.luckmail_base_url) {
         data.luckmail_base_url = 'https://mails.luckyous.com/'
+      }
+      if (!data.qqemail_api_url) {
+        data.qqemail_api_url = 'https://qqemail.eu.org'
+      }
+      if (!data.qqemail_domain) {
+        data.qqemail_domain = 'qqemail.eu.org'
       }
       data.cfworker_domains = parseStoredDomainList(data.cfworker_domains)
       data.cfworker_enabled_domains = parseStoredDomainList(data.cfworker_enabled_domains)
