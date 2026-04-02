@@ -380,7 +380,7 @@ class ChatGPTPlatform(BasePlatform):
         # 构造 Outlook OTP 适配器（如有 Microsoft 凭证）
         skymail = None
         if ms_client_id and ms_refresh_token:
-            skymail = _OutlookOTPAdapter(ms_client_id, ms_refresh_token, proxy)
+            skymail = _OutlookOTPAdapter(ms_client_id, ms_refresh_token, account.email, proxy)
 
         client = OAuthClient(
             config=cfg,
@@ -477,90 +477,71 @@ class ChatGPTPlatform(BasePlatform):
 class _OutlookOTPAdapter:
     """
     OAuthClient.login_and_get_tokens 的 skymail_client 适配器。
-    用 Microsoft Graph API 从 Outlook 收件箱读取 OTP 验证码。
+    通过 appleemail.top API 从 Outlook 收件箱读取 OTP 验证码。
     """
 
-    def __init__(self, client_id: str, refresh_token: str, proxy: str = None):
+    def __init__(self, client_id: str, refresh_token: str, email: str, proxy: str = None):
         self._client_id = client_id
         self._refresh_token = refresh_token
+        self._email = email
         self._proxy = proxy
-        self._ms_access_token: str = ""
         self._used_codes: set = set()
+        self._api_base = "https://www.appleemail.top"
 
-    def _ensure_ms_token(self):
-        if self._ms_access_token:
-            return
+    def fetch_emails(self, email=None) -> list:
         from curl_cffi import requests as cffi_requests
         from core.proxy_utils import build_requests_proxy_config
-        from platforms.chatgpt.constants import MICROSOFT_TOKEN_ENDPOINTS
 
+        target_email = email or self._email
         proxies = build_requests_proxy_config(self._proxy)
         session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
-        resp = session.post(
-            MICROSOFT_TOKEN_ENDPOINTS["LIVE"],
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "client_id": self._client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-                "scope": "https://graph.microsoft.com/Mail.Read offline_access",
-            },
-            timeout=30,
-        )
+        try:
+            resp = session.get(
+                f"{self._api_base}/api/mail-new",
+                params={
+                    "refresh_token": self._refresh_token,
+                    "client_id": self._client_id,
+                    "email": target_email,
+                    "mailbox": "INBOX",
+                    "response_type": "json",
+                },
+                timeout=30,
+            )
+        except Exception:
+            return []
         if resp.status_code != 200:
-            raise RuntimeError(f"Outlook token 刷新失败: {resp.status_code} {resp.text[:200]}")
-        self._ms_access_token = resp.json().get("access_token", "")
-        if not self._ms_access_token:
-            raise RuntimeError("Microsoft token 响应缺少 access_token")
+            return []
+        data = resp.json()
+        if isinstance(data, dict):
+            return [data]
+        if isinstance(data, list):
+            return data
+        return []
+
+    def extract_verification_code(self, content: str) -> str:
+        import re
+        match = re.search(r"(?<!\d)(\d{6})(?!\d)", content or "")
+        return match.group(1) if match else ""
 
     def _read_inbox_otp(self, exclude_codes: set = None, after_ts: float = None) -> str:
-        import re
-        from datetime import datetime, timezone, timedelta
-        from curl_cffi import requests as cffi_requests
-        from core.proxy_utils import build_requests_proxy_config
-
-        # 只取最近 10 分钟内的邮件，且只看 OpenAI 发的
-        cutoff_dt = datetime.fromtimestamp(
-            after_ts if after_ts else (datetime.now(timezone.utc).timestamp() - 300),
-            tz=timezone.utc,
-        )
-        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        proxies = build_requests_proxy_config(self._proxy)
-        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
-        url = (
-            "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
-            f"?$top=10&$orderby=receivedDateTime+desc"
-            f"&$filter=receivedDateTime+ge+{cutoff_str}"
-            "&$select=subject,bodyPreview,body,from,receivedDateTime"
-        )
-        resp = session.get(
-            url,
-            headers={"Authorization": f"Bearer {self._ms_access_token}", "Accept": "application/json"},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            return ""
         exclude = (exclude_codes or set()) | self._used_codes
-        for msg in resp.json().get("value", []):
-            # 只处理 OpenAI 发的邮件
-            sender = (msg.get("from") or {}).get("emailAddress", {}).get("address", "").lower()
-            if not any(d in sender for d in ("openai.com", "noreply")):
-                continue
-            text = msg.get("bodyPreview", "") + " " + (msg.get("body") or {}).get("content", "")
-            match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
-            if match:
-                code = match.group(1)
-                if code not in exclude:
-                    return code
+        msgs = self.fetch_emails(self._email)
+        for msg in msgs:
+            content = (
+                msg.get("bodyPreview") or msg.get("body") or
+                msg.get("content") or msg.get("text") or ""
+            )
+            if isinstance(content, dict):
+                content = content.get("content", "")
+            code = self.extract_verification_code(str(content))
+            if code and code not in exclude:
+                return code
         return ""
 
     def wait_for_verification_code(
         self, email=None, timeout=90, otp_sent_at=None, exclude_codes=None
     ) -> str:
         import time
-        self._ensure_ms_token()
-        # 记录开始等待时间，只接受此后到达的邮件
         wait_start = otp_sent_at if otp_sent_at else time.time()
         deadline = time.time() + timeout
         time.sleep(6)
