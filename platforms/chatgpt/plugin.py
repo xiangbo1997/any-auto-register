@@ -386,6 +386,7 @@ class ChatGPTPlatform(BasePlatform):
                 ms_client_id, ms_refresh_token, account.email, proxy,
                 log_fn=lambda msg: logs.append(msg),
             )
+            skymail.prefetch_known_codes()
 
         client = OAuthClient(
             config=cfg,
@@ -549,6 +550,21 @@ class _OutlookOTPAdapter:
             if code and code not in exclude:
                 return code
         return ""
+
+    def prefetch_known_codes(self):
+        """登录前预读收件箱，把已有验证码加入 _used_codes，避免误用旧码"""
+        msgs = self.fetch_emails(self._email)
+        for msg in msgs:
+            content = (
+                msg.get("bodyPreview") or msg.get("body") or
+                msg.get("content") or msg.get("text") or ""
+            )
+            if isinstance(content, dict):
+                content = content.get("content", "")
+            code = self.extract_verification_code(str(content))
+            if code:
+                self._used_codes.add(code)
+                self._log(f"[AppleMail] 预读到旧验证码 {code}，登录时将忽略")
 
     def wait_for_verification_code(
         self, email=None, timeout=90, otp_sent_at=None, exclude_codes=None
