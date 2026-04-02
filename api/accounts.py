@@ -133,7 +133,8 @@ def import_accounts(
     session: Session = Depends(get_session),
 ):
     """批量导入，支持两种格式:
-    1. email----password----client_id----refresh_token  (----分隔，4列)
+    1. email----ms_password----client_id----refresh_token----chatgpt_password  (----分隔，5列，chatgpt_password 为第5列)
+       也兼容4列: email----password----client_id----refresh_token
     2. email password [refresh_token 或 JSON extra]     (空格分隔)
     """
     created = 0
@@ -147,14 +148,20 @@ def import_accounts(
             if len(parts) < 2:
                 continue
             email = parts[0].strip()
-            password = parts[1].strip()
+            ms_password = parts[1].strip()           # Outlook 邮箱密码
             client_id = parts[2].strip() if len(parts) > 2 else ""
             refresh_token = parts[3].strip() if len(parts) > 3 else ""
+            chatgpt_password = parts[4].strip() if len(parts) > 4 else ""
+
+            # 第5列存在时作为 ChatGPT 登录密码，第2列归入 extra
+            password = chatgpt_password if chatgpt_password else ms_password
             extra: dict = {}
             if client_id:
                 extra["client_id"] = client_id
             if refresh_token:
                 extra["refresh_token"] = refresh_token
+            if chatgpt_password and ms_password:
+                extra["ms_password"] = ms_password
         else:
             parts = raw.split()
             if len(parts) < 2:

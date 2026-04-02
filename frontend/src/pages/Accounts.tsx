@@ -853,8 +853,10 @@ export default function Accounts() {
       >
         {currentPlatform === 'chatgpt' ? (
           <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
-            支持格式：<code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email----password----client_id----refresh_token</code>
-            <br />也支持空格分隔：<code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email password [refresh_token]</code>
+            推荐5列格式（含 ChatGPT 密码）：<br />
+            <code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email----outlook密码----client_id----refresh_token----chatgpt密码</code>
+            <br />也支持4列（无独立 ChatGPT 密码）：<br />
+            <code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email----password----client_id----refresh_token</code>
           </p>
         ) : (
           <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
