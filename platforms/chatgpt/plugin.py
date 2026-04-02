@@ -362,58 +362,62 @@ class ChatGPTPlatform(BasePlatform):
 
     def _do_login(self, account: "Account", codex_acc, proxy: str) -> dict:
         """
-        用 email + password 走 ChatGPT PKCE OAuth 登录，获取 access_token。
+        用 email + password 走 ChatGPT OAuth 登录（复用注册流程的 OAuthClient），
+        获取 access_token / refresh_token / id_token。
         若登录需要 OTP，自动用 Microsoft 凭证（extra.client_id / extra.refresh_token）
-        从 Outlook 收件箱读取验证码后重试。
+        从 Outlook Graph API 读取验证码。
         """
-        from platforms.chatgpt.oauth_pkce_client import OAuthPkceClient
+        import uuid
+        from platforms.chatgpt.oauth_client import OAuthClient
 
         extra = account.extra or {}
         ms_client_id = extra.get("client_id", "")
         ms_refresh_token = extra.get("refresh_token", "")
 
-        def _run_pkce(otp_code: str = "") -> dict:
-            pkce = OAuthPkceClient(proxy=proxy, log_fn=lambda _: None)
-            login_oauth = pkce.login_after_register(
-                account.email, account.password, otp_code=otp_code
-            )
-            workspace_id = pkce.extract_workspace_id()
-            continue_url = pkce.select_workspace(workspace_id)
-            return pkce.follow_redirects_and_exchange_token(continue_url, login_oauth)
+        device_id = str(uuid.uuid4())
+        cfg = self.config.extra if self.config and self.config.extra else {}
 
-        # 第一次尝试，不带 OTP
-        try:
-            tokens = _run_pkce()
-        except RuntimeError as e:
-            err = str(e)
-            needs_otp = "otp" in err.lower() or "二次" in err or "验证码" in err
-            if not needs_otp or not ms_client_id or not ms_refresh_token:
-                return {"ok": False, "error": err}
-            # 需要 OTP，尝试从 Outlook 读取
-            try:
-                otp = self._fetch_outlook_otp(ms_client_id, ms_refresh_token, proxy)
-            except Exception as otp_err:
-                return {"ok": False, "error": f"登录需要 OTP，但从 Outlook 读取失败: {otp_err}"}
-            if not otp:
-                return {"ok": False, "error": "登录需要 OTP，但 Outlook 收件箱中未找到验证码"}
-            try:
-                tokens = _run_pkce(otp_code=otp)
-            except RuntimeError as e2:
-                return {"ok": False, "error": f"携带 OTP 登录仍失败: {e2}"}
+        # 构造 Outlook OTP 适配器（如有 Microsoft 凭证）
+        skymail = None
+        if ms_client_id and ms_refresh_token:
+            skymail = _OutlookOTPAdapter(ms_client_id, ms_refresh_token, proxy)
 
-        if not tokens.get("access_token"):
-            return {"ok": False, "error": "登录完成但未获取到 access_token"}
+        client = OAuthClient(
+            config=cfg,
+            proxy=proxy,
+            verbose=False,
+            browser_mode="protocol",
+        )
 
-        # 保留 Microsoft 凭证到单独字段，防止被 ChatGPT 字段覆盖
+        logs = []
+        client._log = lambda msg, *_: logs.append(msg)
+
+        tokens = client.login_and_get_tokens(
+            email=account.email,
+            password=account.password,
+            device_id=device_id,
+            impersonate="chrome110",
+            skymail_client=skymail,
+        )
+
+        if not tokens or not tokens.get("access_token"):
+            err = client.last_error or "登录失败，未获取到 access_token"
+            return {"ok": False, "error": err}
+
+        # 构建 auth file metadata
+        from platforms.chatgpt.register_v2 import RegistrationEngineV2
+        auth_meta = RegistrationEngineV2._build_auth_file_metadata(tokens)
+
         data: dict = {
             "access_token": tokens["access_token"],
             "refresh_token": tokens.get("refresh_token", ""),
             "id_token": tokens.get("id_token", ""),
-            "account_id": tokens.get("account_id", ""),
-            "expired": tokens.get("expired", ""),
-            "last_refresh": tokens.get("last_refresh", ""),
-            "auth_file_complete": True,
+            "account_id": auth_meta.get("account_id", ""),
+            "expired": auth_meta.get("expired", ""),
+            "last_refresh": auth_meta.get("last_refresh", ""),
+            "auth_file_complete": bool(auth_meta.get("auth_file_complete", False)),
         }
+        # 保留 Microsoft 凭证，防止被 ChatGPT 字段覆盖
         if ms_client_id:
             data["ms_client_id"] = ms_client_id
         if ms_refresh_token:
@@ -435,7 +439,6 @@ class ChatGPTPlatform(BasePlatform):
         proxies = build_requests_proxy_config(proxy)
         session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
 
-        # 换取带 Mail.Read 权限的 access_token
         resp = session.post(
             MICROSOFT_TOKEN_ENDPOINTS["LIVE"],
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -453,7 +456,6 @@ class ChatGPTPlatform(BasePlatform):
         if not ms_token:
             raise RuntimeError("Microsoft token 响应中缺少 access_token")
 
-        # 等待邮件到达后读取
         time.sleep(6)
         mail_resp = session.get(
             "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
@@ -469,4 +471,84 @@ class ChatGPTPlatform(BasePlatform):
             match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
             if match:
                 return match.group(1)
+        return ""
+
+
+class _OutlookOTPAdapter:
+    """
+    OAuthClient.login_and_get_tokens 的 skymail_client 适配器。
+    用 Microsoft Graph API 从 Outlook 收件箱读取 OTP 验证码。
+    """
+
+    def __init__(self, client_id: str, refresh_token: str, proxy: str = None):
+        self._client_id = client_id
+        self._refresh_token = refresh_token
+        self._proxy = proxy
+        self._ms_access_token: str = ""
+        self._used_codes: set = set()
+
+    def _ensure_ms_token(self):
+        if self._ms_access_token:
+            return
+        from curl_cffi import requests as cffi_requests
+        from core.proxy_utils import build_requests_proxy_config
+        from platforms.chatgpt.constants import MICROSOFT_TOKEN_ENDPOINTS
+
+        proxies = build_requests_proxy_config(self._proxy)
+        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
+        resp = session.post(
+            MICROSOFT_TOKEN_ENDPOINTS["LIVE"],
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "client_id": self._client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+                "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Outlook token 刷新失败: {resp.status_code} {resp.text[:200]}")
+        self._ms_access_token = resp.json().get("access_token", "")
+        if not self._ms_access_token:
+            raise RuntimeError("Microsoft token 响应缺少 access_token")
+
+    def _read_inbox_otp(self, exclude_codes: set = None) -> str:
+        import re
+        from curl_cffi import requests as cffi_requests
+        from core.proxy_utils import build_requests_proxy_config
+
+        proxies = build_requests_proxy_config(self._proxy)
+        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
+        resp = session.get(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
+            "?$top=10&$orderby=receivedDateTime+desc&$select=subject,bodyPreview,body",
+            headers={"Authorization": f"Bearer {self._ms_access_token}", "Accept": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return ""
+        exclude = (exclude_codes or set()) | self._used_codes
+        for msg in resp.json().get("value", []):
+            text = msg.get("bodyPreview", "") + " " + (msg.get("body") or {}).get("content", "")
+            match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
+            if match:
+                code = match.group(1)
+                if code not in exclude:
+                    return code
+        return ""
+
+    def wait_for_verification_code(
+        self, email=None, timeout=90, otp_sent_at=None, exclude_codes=None
+    ) -> str:
+        import time
+        self._ensure_ms_token()
+        deadline = time.time() + timeout
+        time.sleep(5)
+        while time.time() < deadline:
+            code = self._read_inbox_otp(exclude_codes)
+            if code:
+                self._used_codes.add(code)
+                return code
+            time.sleep(5)
         return ""
