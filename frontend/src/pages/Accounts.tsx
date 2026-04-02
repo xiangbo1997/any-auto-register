@@ -143,6 +143,8 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
 
 function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
   const [actions, setActions] = useState<any[]>([])
+  const [loading, setLoading] = useState(false)
+  const [loadingLabel, setLoadingLabel] = useState('')
   const [resultOpen, setResultOpen] = useState(false)
   const [resultTitle, setResultTitle] = useState('')
   const [resultStatus, setResultStatus] = useState<'success' | 'error'>('success')
@@ -174,7 +176,10 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
   }
 
   const handleAction = async (actionId: string) => {
+    if (loading) return
     const actionLabel = actions.find((item) => item.id === actionId)?.label || actionId
+    setLoading(true)
+    setLoadingLabel(actionLabel)
 
     try {
       const r = await apiFetch(`/actions/${acc.platform}/${acc.id}/${actionId}`, {
@@ -205,6 +210,9 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
       const detail = e?.message ? String(e.message) : '请求失败'
       message.error(detail)
       showResult(actionLabel, 'error', detail)
+    } finally {
+      setLoading(false)
+      setLoadingLabel('')
     }
   }
 
@@ -222,8 +230,15 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
           items: menuItems,
           onClick: ({ key }) => handleAction(String(key)),
         }}
+        disabled={loading}
       >
-        <Button type="link" size="small" icon={<MoreOutlined />} />
+        <Button
+          type="link"
+          size="small"
+          loading={loading}
+          icon={loading ? undefined : <MoreOutlined />}
+          title={loading ? `${loadingLabel} 执行中...` : undefined}
+        />
       </Dropdown>
       <Modal
         title={resultTitle}
