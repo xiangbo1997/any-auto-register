@@ -129,6 +129,65 @@ class TokenRefreshManager:
             logger.error(result.error_message)
             return result
 
+    @staticmethod
+    def _is_microsoft_token(refresh_token: str, client_id: str = "") -> bool:
+        """判断是否为 Microsoft 账号 token（M. 开头 或 client_id 是 UUID 格式）"""
+        import re
+        if refresh_token and refresh_token.startswith("M."):
+            return True
+        if client_id and re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            client_id, re.IGNORECASE
+        ):
+            return True
+        return False
+
+    def refresh_by_microsoft_token(
+        self,
+        refresh_token: str,
+        client_id: str,
+    ) -> TokenRefreshResult:
+        """使用 Microsoft refresh_token 刷新，适用于 Microsoft 登录的 ChatGPT 账号"""
+        result = TokenRefreshResult(success=False)
+        try:
+            from .constants import MICROSOFT_TOKEN_ENDPOINTS
+            session = self._create_session()
+            token_data = {
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "scope": "openid profile email offline_access",
+            }
+            response = session.post(
+                MICROSOFT_TOKEN_ENDPOINTS["LIVE"],
+                headers={
+                    "content-type": "application/x-www-form-urlencoded",
+                    "accept": "application/json",
+                },
+                data=token_data,
+                timeout=30,
+            )
+            if response.status_code != 200:
+                result.error_message = f"Microsoft token 刷新失败: HTTP {response.status_code}, {response.text[:200]}"
+                logger.warning(result.error_message)
+                return result
+            data = response.json()
+            access_token = data.get("access_token")
+            new_refresh_token = data.get("refresh_token", refresh_token)
+            if not access_token:
+                result.error_message = f"Microsoft token 刷新失败: 未找到 access_token, {data}"
+                logger.warning(result.error_message)
+                return result
+            result.success = True
+            result.access_token = access_token
+            result.refresh_token = new_refresh_token
+            logger.info("Microsoft token 刷新成功")
+            return result
+        except Exception as e:
+            result.error_message = f"Microsoft token 刷新异常: {str(e)}"
+            logger.error(result.error_message)
+            return result
+
     def refresh_by_oauth_token(
         self,
         refresh_token: str,
@@ -227,11 +286,19 @@ class TokenRefreshManager:
 
         # 尝试 OAuth Refresh Token
         if account.refresh_token:
-            logger.info(f"尝试使用 OAuth Refresh Token 刷新账号 {account.email}")
-            result = self.refresh_by_oauth_token(
-                refresh_token=account.refresh_token,
-                client_id=account.client_id
-            )
+            client_id = getattr(account, "client_id", "") or ""
+            if self._is_microsoft_token(account.refresh_token, client_id):
+                logger.info(f"检测到 Microsoft token，使用 Microsoft 端点刷新账号 {account.email}")
+                result = self.refresh_by_microsoft_token(
+                    refresh_token=account.refresh_token,
+                    client_id=client_id,
+                )
+            else:
+                logger.info(f"尝试使用 OAuth Refresh Token 刷新账号 {account.email}")
+                result = self.refresh_by_oauth_token(
+                    refresh_token=account.refresh_token,
+                    client_id=client_id or None,
+                )
             return result
 
         # 无可用刷新方式
