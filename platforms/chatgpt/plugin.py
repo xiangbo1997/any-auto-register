@@ -160,6 +160,26 @@ class ChatGPTPlatform(BasePlatform):
         if not result or not result.success:
             raise RuntimeError(result.error_message if result else "注册失败")
 
+        # Try PKCE token exchange so uploaded tokens work with Codex CLI API
+        # (chatgpt.com/backend-api/codex/responses requires app_EMoamEEZ73f0CkXaXp7hrann tokens)
+        _reg_email = result.email
+        _reg_password = result.password or password
+        if _reg_email and _reg_password:
+            try:
+                from platforms.chatgpt.oauth_pkce_client import OAuthPkceClient
+                _pkce = OAuthPkceClient(proxy=proxy, log_fn=log_fn)
+                _login_oauth = _pkce.login_after_register(_reg_email, _reg_password)
+                _workspace_id = _pkce.extract_workspace_id()
+                _continue_url = _pkce.select_workspace(_workspace_id)
+                _pkce_tokens = _pkce.follow_redirects_and_exchange_token(_continue_url, _login_oauth)
+                if _pkce_tokens and _pkce_tokens.get("access_token"):
+                    log_fn("PKCE token exchange succeeded — using OAuth tokens for Codex compatibility")
+                    result.access_token = _pkce_tokens["access_token"]
+                    result.refresh_token = _pkce_tokens.get("refresh_token", result.refresh_token)
+                    result.id_token = _pkce_tokens.get("id_token", result.id_token)
+            except Exception as _pkce_err:
+                log_fn(f"PKCE token exchange failed (falling back to session token): {_pkce_err}")
+
         return Account(
             platform="chatgpt",
             email=result.email,
@@ -173,11 +193,16 @@ class ChatGPTPlatform(BasePlatform):
                 "id_token": result.id_token,
                 "session_token": result.session_token,
                 "workspace_id": result.workspace_id,
+                "account_id": result.account_id,
+                "expired": result.expired,
+                "last_refresh": result.last_refresh,
+                "auth_file_complete": result.auth_file_complete,
             },
         )
 
     def get_platform_actions(self) -> list:
         return [
+            {"id": "login", "label": "登录获取 Token", "params": []},
             {"id": "refresh_token", "label": "刷新 Token", "params": []},
             {
                 "id": "payment_link",
@@ -236,6 +261,13 @@ class ChatGPTPlatform(BasePlatform):
         a.session_token = extra.get("session_token", "")
         a.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
         a.cookies = extra.get("cookies", "")
+        a.account_id = extra.get("account_id", "")
+        a.expired = extra.get("expired", "")
+        a.last_refresh = extra.get("last_refresh", "")
+        a.auth_file_complete = bool(extra.get("auth_file_complete", False))
+
+        if action_id == "login":
+            return self._do_login(account, a, proxy)
 
         if action_id == "refresh_token":
             from platforms.chatgpt.token_refresh import TokenRefreshManager
@@ -273,7 +305,7 @@ class ChatGPTPlatform(BasePlatform):
         if action_id == "upload_cpa":
             from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
 
-            token_data = generate_token_json(a)
+            token_data = generate_token_json(a, allow_compat_id_token=True)
             ok, msg = upload_to_cpa(
                 token_data,
                 api_url=params.get("api_url"),
@@ -327,3 +359,114 @@ class ChatGPTPlatform(BasePlatform):
             return {"ok": ok, "data": msg}
 
         raise NotImplementedError(f"未知操作: {action_id}")
+
+    def _do_login(self, account: "Account", codex_acc, proxy: str) -> dict:
+        """
+        用 email + password 走 ChatGPT PKCE OAuth 登录，获取 access_token。
+        若登录需要 OTP，自动用 Microsoft 凭证（extra.client_id / extra.refresh_token）
+        从 Outlook 收件箱读取验证码后重试。
+        """
+        from platforms.chatgpt.oauth_pkce_client import OAuthPkceClient
+
+        extra = account.extra or {}
+        ms_client_id = extra.get("client_id", "")
+        ms_refresh_token = extra.get("refresh_token", "")
+
+        def _run_pkce(otp_code: str = "") -> dict:
+            pkce = OAuthPkceClient(proxy=proxy, log_fn=lambda _: None)
+            login_oauth = pkce.login_after_register(
+                account.email, account.password, otp_code=otp_code
+            )
+            workspace_id = pkce.extract_workspace_id()
+            continue_url = pkce.select_workspace(workspace_id)
+            return pkce.follow_redirects_and_exchange_token(continue_url, login_oauth)
+
+        # 第一次尝试，不带 OTP
+        try:
+            tokens = _run_pkce()
+        except RuntimeError as e:
+            err = str(e)
+            needs_otp = "otp" in err.lower() or "二次" in err or "验证码" in err
+            if not needs_otp or not ms_client_id or not ms_refresh_token:
+                return {"ok": False, "error": err}
+            # 需要 OTP，尝试从 Outlook 读取
+            try:
+                otp = self._fetch_outlook_otp(ms_client_id, ms_refresh_token, proxy)
+            except Exception as otp_err:
+                return {"ok": False, "error": f"登录需要 OTP，但从 Outlook 读取失败: {otp_err}"}
+            if not otp:
+                return {"ok": False, "error": "登录需要 OTP，但 Outlook 收件箱中未找到验证码"}
+            try:
+                tokens = _run_pkce(otp_code=otp)
+            except RuntimeError as e2:
+                return {"ok": False, "error": f"携带 OTP 登录仍失败: {e2}"}
+
+        if not tokens.get("access_token"):
+            return {"ok": False, "error": "登录完成但未获取到 access_token"}
+
+        # 保留 Microsoft 凭证到单独字段，防止被 ChatGPT 字段覆盖
+        data: dict = {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens.get("refresh_token", ""),
+            "id_token": tokens.get("id_token", ""),
+            "account_id": tokens.get("account_id", ""),
+            "expired": tokens.get("expired", ""),
+            "last_refresh": tokens.get("last_refresh", ""),
+            "auth_file_complete": True,
+        }
+        if ms_client_id:
+            data["ms_client_id"] = ms_client_id
+        if ms_refresh_token:
+            data["ms_refresh_token"] = ms_refresh_token
+        return {"ok": True, "data": data}
+
+    @staticmethod
+    def _fetch_outlook_otp(client_id: str, refresh_token: str, proxy: str = None) -> str:
+        """
+        用 Microsoft refresh_token 换取带 Mail.Read 权限的 access_token，
+        然后通过 Graph API 读取最新邮件中的 6 位 OTP。
+        """
+        import re
+        import time
+        from curl_cffi import requests as cffi_requests
+        from core.proxy_utils import build_requests_proxy_config
+        from platforms.chatgpt.constants import MICROSOFT_TOKEN_ENDPOINTS
+
+        proxies = build_requests_proxy_config(proxy)
+        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
+
+        # 换取带 Mail.Read 权限的 access_token
+        resp = session.post(
+            MICROSOFT_TOKEN_ENDPOINTS["LIVE"],
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"获取 Outlook Mail.Read token 失败: HTTP {resp.status_code} {resp.text[:200]}")
+        ms_token = resp.json().get("access_token")
+        if not ms_token:
+            raise RuntimeError("Microsoft token 响应中缺少 access_token")
+
+        # 等待邮件到达后读取
+        time.sleep(6)
+        mail_resp = session.get(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
+            "?$top=5&$orderby=receivedDateTime+desc&$select=subject,bodyPreview,body",
+            headers={"Authorization": f"Bearer {ms_token}", "Accept": "application/json"},
+            timeout=30,
+        )
+        if mail_resp.status_code != 200:
+            raise RuntimeError(f"Graph API 读取邮件失败: HTTP {mail_resp.status_code} {mail_resp.text[:200]}")
+
+        for msg in mail_resp.json().get("value", []):
+            text = msg.get("bodyPreview", "") + " " + (msg.get("body") or {}).get("content", "")
+            match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
+            if match:
+                return match.group(1)
+        return ""
