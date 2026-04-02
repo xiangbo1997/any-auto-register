@@ -19,12 +19,16 @@ class AccountCreate(BaseModel):
     status: str = "registered"
     token: str = ""
     cashier_url: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
 
 
 class AccountUpdate(BaseModel):
     status: Optional[str] = None
     token: Optional[str] = None
     cashier_url: Optional[str] = None
+    refresh_token: Optional[str] = None
+    access_token: Optional[str] = None
 
 
 class ImportRequest(BaseModel):
@@ -59,13 +63,22 @@ def list_accounts(
 
 @router.post("")
 def create_account(body: AccountCreate, session: Session = Depends(get_session)):
+    extra: dict = {}
+    effective_token = body.token
+    if body.access_token:
+        extra["access_token"] = body.access_token
+        if not effective_token:
+            effective_token = body.access_token
+    if body.refresh_token:
+        extra["refresh_token"] = body.refresh_token
     acc = AccountModel(
         platform=body.platform,
         email=body.email,
         password=body.password,
         status=body.status,
-        token=body.token,
+        token=effective_token,
         cashier_url=body.cashier_url,
+        extra_json=json.dumps(extra) if extra else "{}",
     )
     session.add(acc)
     session.commit()
@@ -119,23 +132,51 @@ def import_accounts(
     body: ImportRequest,
     session: Session = Depends(get_session),
 ):
-    """批量导入，每行格式: email password [extra]"""
+    """批量导入，支持两种格式:
+    1. email----password----client_id----refresh_token  (----分隔，4列)
+    2. email password [refresh_token 或 JSON extra]     (空格分隔)
+    """
     created = 0
     for line in body.lines:
-        parts = line.strip().split()
-        if len(parts) < 2:
+        raw = line.strip()
+        if not raw:
             continue
-        email, password = parts[0], parts[1]
-        extra = parts[2] if len(parts) > 2 else ""
-        if extra:
-            try:
-                json.loads(extra)
-            except (json.JSONDecodeError, ValueError):
-                extra = "{}"
+
+        if "----" in raw:
+            parts = raw.split("----")
+            if len(parts) < 2:
+                continue
+            email = parts[0].strip()
+            password = parts[1].strip()
+            client_id = parts[2].strip() if len(parts) > 2 else ""
+            refresh_token = parts[3].strip() if len(parts) > 3 else ""
+            extra: dict = {}
+            if client_id:
+                extra["client_id"] = client_id
+            if refresh_token:
+                extra["refresh_token"] = refresh_token
         else:
-            extra = "{}"
-        acc = AccountModel(platform=body.platform, email=email,
-                           password=password, extra_json=extra)
+            parts = raw.split()
+            if len(parts) < 2:
+                continue
+            email, password = parts[0], parts[1]
+            extra = {}
+            if len(parts) > 2:
+                third = parts[2]
+                try:
+                    parsed = json.loads(third)
+                    if isinstance(parsed, dict):
+                        extra = parsed
+                except (json.JSONDecodeError, ValueError):
+                    extra = {"refresh_token": third}
+
+        acc = AccountModel(
+            platform=body.platform,
+            email=email,
+            password=password,
+            token="",
+            extra_json=json.dumps(extra),
+        )
         session.add(acc)
         created += 1
     session.commit()
@@ -208,6 +249,18 @@ def update_account(account_id: int, body: AccountUpdate,
         acc.token = body.token
     if body.cashier_url is not None:
         acc.cashier_url = body.cashier_url
+    if body.access_token is not None or body.refresh_token is not None:
+        try:
+            extra = json.loads(acc.extra_json or "{}")
+        except (json.JSONDecodeError, ValueError):
+            extra = {}
+        if body.access_token is not None:
+            extra["access_token"] = body.access_token
+            if not acc.token or body.token is None:
+                acc.token = body.access_token
+        if body.refresh_token is not None:
+            extra["refresh_token"] = body.refresh_token
+        acc.extra_json = json.dumps(extra)
     acc.updated_at = datetime.now(timezone.utc)
     session.add(acc)
     session.commit()

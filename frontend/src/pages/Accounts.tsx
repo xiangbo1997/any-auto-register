@@ -464,9 +464,16 @@ export default function Accounts() {
 
   const handleDetailSave = async () => {
     const values = await detailForm.validateFields()
+    const payload: Record<string, any> = { status: values.status }
+    if (currentAccount?.platform === 'chatgpt') {
+      if (values.access_token !== undefined) payload.access_token = values.access_token
+      if (values.refresh_token !== undefined) payload.refresh_token = values.refresh_token
+    } else {
+      if (values.token !== undefined) payload.token = values.token
+    }
     await apiFetch(`/accounts/${currentAccount.id}`, {
       method: 'PATCH',
-      body: JSON.stringify(values),
+      body: JSON.stringify(payload),
     })
     message.success('保存成功')
     setDetailModalOpen(false)
@@ -807,9 +814,20 @@ export default function Accounts() {
           <Form.Item name="password" label="密码" rules={[{ required: true }]}>
             <Input.Password />
           </Form.Item>
-          <Form.Item name="token" label="Token">
-            <Input />
-          </Form.Item>
+          {currentPlatform === 'chatgpt' ? (
+            <>
+              <Form.Item name="access_token" label="Access Token">
+                <Input.TextArea rows={2} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder="eyJ..." />
+              </Form.Item>
+              <Form.Item name="refresh_token" label="Refresh Token">
+                <Input.TextArea rows={2} style={{ fontFamily: 'monospace', fontSize: 12 }} />
+              </Form.Item>
+            </>
+          ) : (
+            <Form.Item name="token" label="Token">
+              <Input />
+            </Form.Item>
+          )}
           <Form.Item name="cashier_url" label="试用链接">
             <Input />
           </Form.Item>
@@ -833,9 +851,16 @@ export default function Accounts() {
         confirmLoading={importLoading}
         maskClosable={false}
       >
-        <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
-          每行格式: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 4px', borderRadius: 4 }}>email password [cashier_url]</code>
-        </p>
+        {currentPlatform === 'chatgpt' ? (
+          <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
+            支持格式：<code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email----password----client_id----refresh_token</code>
+            <br />也支持空格分隔：<code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email password [refresh_token]</code>
+          </p>
+        ) : (
+          <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
+            每行格式: <code style={{ background: 'rgba(0,0,0,0.06)', padding: '2px 4px', borderRadius: 4 }}>email password [refresh_token]</code>
+          </p>
+        )}
         <Input.TextArea
           value={importText}
           onChange={(e) => setImportText(e.target.value)}
@@ -852,41 +877,41 @@ export default function Accounts() {
         maskClosable={false}
       >
         {currentAccount && (
-          <>
-            <Form form={detailForm} layout="vertical" initialValues={currentAccount}>
-              <Form.Item name="status" label="状态">
-                <Select
-                  options={[
-                    { value: 'registered', label: '已注册' },
-                    { value: 'trial', label: '试用中' },
-                    { value: 'subscribed', label: '已订阅' },
-                    { value: 'expired', label: '已过期' },
-                    { value: 'invalid', label: '已失效' },
-                  ]}
-                />
-              </Form.Item>
-              <Form.Item name="token" label="Access Token">
+          <Form
+            form={detailForm}
+            layout="vertical"
+            initialValues={{
+              ...currentAccount,
+              access_token: currentAccount.extra?.access_token || currentAccount.token || '',
+              refresh_token: currentAccount.extra?.refresh_token || '',
+            }}
+          >
+            <Form.Item name="status" label="状态">
+              <Select
+                options={[
+                  { value: 'registered', label: '已注册' },
+                  { value: 'trial', label: '试用中' },
+                  { value: 'subscribed', label: '已订阅' },
+                  { value: 'expired', label: '已过期' },
+                  { value: 'invalid', label: '已失效' },
+                ]}
+              />
+            </Form.Item>
+            {currentAccount.platform === 'chatgpt' ? (
+              <>
+                <Form.Item name="access_token" label="Access Token">
+                  <Input.TextArea rows={2} style={{ fontFamily: 'monospace', fontSize: 11 }} />
+                </Form.Item>
+                <Form.Item name="refresh_token" label="Refresh Token">
+                  <Input.TextArea rows={2} style={{ fontFamily: 'monospace', fontSize: 11 }} />
+                </Form.Item>
+              </>
+            ) : (
+              <Form.Item name="token" label="Token">
                 <Input.TextArea rows={2} style={{ fontFamily: 'monospace' }} />
               </Form.Item>
-            </Form>
-            {(() => {
-              const rt = getRefreshToken(currentAccount)
-              if (!rt) return null
-              return (
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>Refresh Token</div>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: 'rgba(0,0,0,0.03)', border: '1px solid #e5e7eb', borderRadius: 6, padding: '6px 10px' }}>
-                    <Text
-                      style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
-                      copyable={{ text: rt, tooltips: ['复制 RT', '已复制'] }}
-                    >
-                      {rt}
-                    </Text>
-                  </div>
-                </div>
-              )
-            })()}
-          </>
+            )}
+          </Form>
         )}
       </Modal>
     </div>
