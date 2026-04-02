@@ -371,8 +371,9 @@ class ChatGPTPlatform(BasePlatform):
         from platforms.chatgpt.oauth_client import OAuthClient
 
         extra = account.extra or {}
-        ms_client_id = extra.get("client_id", "")
-        ms_refresh_token = extra.get("refresh_token", "")
+        # 登录成功后 refresh_token 会被 ChatGPT token 覆盖，优先取 ms_refresh_token
+        ms_client_id = extra.get("ms_client_id") or extra.get("client_id", "")
+        ms_refresh_token = extra.get("ms_refresh_token") or extra.get("refresh_token", "")
 
         device_id = str(uuid.uuid4())
         cfg = self.config.extra if self.config and self.config.extra else {}
