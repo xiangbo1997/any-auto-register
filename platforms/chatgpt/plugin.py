@@ -520,7 +520,11 @@ class _OutlookOTPAdapter:
         if resp.status_code != 200:
             return []
         data = resp.json()
+        # appleemail.top 返回格式: {"code":200,"success":true,"data":{...}}
         if isinstance(data, dict):
+            inner = data.get("data")
+            if inner is not None:
+                return [inner] if isinstance(inner, dict) else (inner if isinstance(inner, list) else [])
             return [data]
         if isinstance(data, list):
             return data
