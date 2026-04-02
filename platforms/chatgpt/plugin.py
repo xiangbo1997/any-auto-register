@@ -377,10 +377,15 @@ class ChatGPTPlatform(BasePlatform):
         device_id = str(uuid.uuid4())
         cfg = self.config.extra if self.config and self.config.extra else {}
 
+        logs = []
+
         # 构造 Outlook OTP 适配器（如有 Microsoft 凭证）
         skymail = None
         if ms_client_id and ms_refresh_token:
-            skymail = _OutlookOTPAdapter(ms_client_id, ms_refresh_token, account.email, proxy)
+            skymail = _OutlookOTPAdapter(
+                ms_client_id, ms_refresh_token, account.email, proxy,
+                log_fn=lambda msg: logs.append(msg),
+            )
 
         client = OAuthClient(
             config=cfg,
@@ -389,7 +394,6 @@ class ChatGPTPlatform(BasePlatform):
             browser_mode="protocol",
         )
 
-        logs = []
         client._log = lambda msg, *_: logs.append(msg)
 
         tokens = client.login_and_get_tokens(
@@ -402,7 +406,7 @@ class ChatGPTPlatform(BasePlatform):
 
         if not tokens or not tokens.get("access_token"):
             err = client.last_error or "登录失败，未获取到 access_token"
-            return {"ok": False, "error": err}
+            return {"ok": False, "error": err, "logs": logs}
 
         # 构建 auth file metadata
         from platforms.chatgpt.register_v2 import RegistrationEngineV2
@@ -422,7 +426,7 @@ class ChatGPTPlatform(BasePlatform):
             data["ms_client_id"] = ms_client_id
         if ms_refresh_token:
             data["ms_refresh_token"] = ms_refresh_token
-        return {"ok": True, "data": data}
+        return {"ok": True, "data": data, "logs": logs}
 
     @staticmethod
     def _fetch_outlook_otp(client_id: str, refresh_token: str, proxy: str = None) -> str:
@@ -480,13 +484,14 @@ class _OutlookOTPAdapter:
     通过 appleemail.top API 从 Outlook 收件箱读取 OTP 验证码。
     """
 
-    def __init__(self, client_id: str, refresh_token: str, email: str, proxy: str = None):
+    def __init__(self, client_id: str, refresh_token: str, email: str, proxy: str = None, log_fn=None):
         self._client_id = client_id
         self._refresh_token = refresh_token
         self._email = email
         self._proxy = proxy
         self._used_codes: set = set()
         self._api_base = "https://www.appleemail.top"
+        self._log = log_fn or (lambda msg: None)
 
     def fetch_emails(self, email=None) -> list:
         from curl_cffi import requests as cffi_requests
@@ -495,6 +500,7 @@ class _OutlookOTPAdapter:
         target_email = email or self._email
         proxies = build_requests_proxy_config(self._proxy)
         session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
+        self._log(f"[AppleMail] 查询收件箱: {target_email}")
         try:
             resp = session.get(
                 f"{self._api_base}/api/mail-new",
@@ -507,8 +513,10 @@ class _OutlookOTPAdapter:
                 },
                 timeout=30,
             )
-        except Exception:
+        except Exception as e:
+            self._log(f"[AppleMail] 请求异常: {e}")
             return []
+        self._log(f"[AppleMail] 响应 HTTP {resp.status_code}: {resp.text[:200]}")
         if resp.status_code != 200:
             return []
         data = resp.json()
