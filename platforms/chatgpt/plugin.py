@@ -386,7 +386,7 @@ class ChatGPTPlatform(BasePlatform):
                 ms_client_id, ms_refresh_token, account.email, proxy,
                 log_fn=lambda msg: logs.append(msg),
             )
-            skymail.prefetch_known_codes()
+            skymail.clear_inbox()
 
         client = OAuthClient(
             config=cfg,
@@ -494,31 +494,29 @@ class _OutlookOTPAdapter:
         self._api_base = "https://www.appleemail.top"
         self._log = log_fn or (lambda msg: None)
 
-    def fetch_emails(self, email=None) -> list:
+    def _fetch_mailbox(self, email: str, mailbox: str) -> list:
         from curl_cffi import requests as cffi_requests
         from core.proxy_utils import build_requests_proxy_config
 
-        target_email = email or self._email
         proxies = build_requests_proxy_config(self._proxy)
         session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
-        self._log(f"[AppleMail] 查询收件箱: {target_email}")
         try:
             resp = session.get(
                 f"{self._api_base}/api/mail-new",
                 params={
                     "refresh_token": self._refresh_token,
                     "client_id": self._client_id,
-                    "email": target_email,
-                    "mailbox": "INBOX",
+                    "email": email,
+                    "mailbox": mailbox,
                     "response_type": "json",
                 },
                 timeout=30,
             )
         except Exception as e:
-            self._log(f"[AppleMail] 请求异常: {e}")
+            self._log(f"[AppleMail] {mailbox} 请求异常: {e}")
             return []
-        self._log(f"[AppleMail] 响应 HTTP {resp.status_code}: {resp.text[:200]}")
         if resp.status_code != 200:
+            self._log(f"[AppleMail] {mailbox} HTTP {resp.status_code}: {resp.text[:100]}")
             return []
         data = resp.json()
         # appleemail.top 返回格式: {"code":200,"success":true,"data":{...}}
@@ -530,6 +528,17 @@ class _OutlookOTPAdapter:
         if isinstance(data, list):
             return data
         return []
+
+    def fetch_emails(self, email=None) -> list:
+        """查询 INBOX 和 Junk，OpenAI 验证邮件有时落到垃圾箱"""
+        target = email or self._email
+        results = []
+        for mailbox in ("INBOX", "Junk"):
+            msgs = self._fetch_mailbox(target, mailbox)
+            if msgs:
+                self._log(f"[AppleMail] {mailbox} 有 {len(msgs)} 封邮件")
+            results.extend(msgs)
+        return results
 
     def extract_verification_code(self, content: str) -> str:
         import re
@@ -551,20 +560,27 @@ class _OutlookOTPAdapter:
                 return code
         return ""
 
-    def prefetch_known_codes(self):
-        """登录前预读收件箱，把已有验证码加入 _used_codes，避免误用旧码"""
-        msgs = self.fetch_emails(self._email)
-        for msg in msgs:
-            content = (
-                msg.get("bodyPreview") or msg.get("body") or
-                msg.get("content") or msg.get("text") or ""
-            )
-            if isinstance(content, dict):
-                content = content.get("content", "")
-            code = self.extract_verification_code(str(content))
-            if code:
-                self._used_codes.add(code)
-                self._log(f"[AppleMail] 预读到旧验证码 {code}，登录时将忽略")
+    def clear_inbox(self):
+        """登录前清空 INBOX 和 Junk，确保只接受此后新到的验证码"""
+        from curl_cffi import requests as cffi_requests
+        from core.proxy_utils import build_requests_proxy_config
+
+        proxies = build_requests_proxy_config(self._proxy)
+        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
+        for endpoint in ("/api/process-inbox", "/api/process-junk"):
+            try:
+                resp = session.get(
+                    f"{self._api_base}{endpoint}",
+                    params={
+                        "refresh_token": self._refresh_token,
+                        "client_id": self._client_id,
+                        "email": self._email,
+                    },
+                    timeout=30,
+                )
+                self._log(f"[AppleMail] 清空 {endpoint}: HTTP {resp.status_code}")
+            except Exception as e:
+                self._log(f"[AppleMail] 清空 {endpoint} 失败: {e}")
 
     def wait_for_verification_code(
         self, email=None, timeout=90, otp_sent_at=None, exclude_codes=None
