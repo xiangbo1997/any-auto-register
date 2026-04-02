@@ -2,11 +2,16 @@
 
 import json
 import random
+import threading
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Any
 from .proxy_utils import build_requests_proxy_config
+
+# AppleMail 全局轮转计数器（跨实例）
+_applemail_rotation_lock = threading.Lock()
+_applemail_rotation_counter = 0
 
 
 @dataclass
@@ -173,6 +178,11 @@ def create_mailbox(
             username=extra.get("qqemail_username", ""),
             password=extra.get("qqemail_password", ""),
             domain=extra.get("qqemail_domain") or "qqemail.eu.org",
+        )
+    elif provider == "applemail":
+        return AppleMailMailbox(
+            accounts_text=extra.get("applemail_accounts", ""),
+            proxy=proxy,
         )
     else:  # laoudo
         return LaoudoMailbox(
@@ -1797,3 +1807,143 @@ class QQEmailMailbox(BaseMailbox):
                 pass
             time.sleep(3)
         raise TimeoutError(f"等待验证码超时 ({timeout}s)")
+
+
+class AppleMailMailbox(BaseMailbox):
+    """
+    小苹果邮件服务 (appleemail.top) 邮箱提供商。
+    账号列表逐条轮转使用，注册成功后从全局配置中删除该账号。
+    """
+
+    _API_BASE = "https://www.appleemail.top"
+
+    def __init__(self, accounts_text: str, proxy: str = None):
+        global _applemail_rotation_counter
+        self._proxy = proxy
+        self._accounts = []
+        for line in (accounts_text or "").split("\n"):
+            parts = line.strip().split("----")
+            if len(parts) >= 4 and parts[0].strip():
+                self._accounts.append({
+                    "email": parts[0].strip(),
+                    "password": parts[1].strip(),
+                    "client_id": parts[2].strip(),
+                    "refresh_token": parts[3].strip(),
+                    "raw": line.strip(),
+                })
+        self._selected: dict = {}
+
+    def get_email(self) -> MailboxAccount:
+        global _applemail_rotation_counter
+        if not self._accounts:
+            raise RuntimeError("AppleMail 未配置账号，请在邮箱设置中填入账号列表")
+        with _applemail_rotation_lock:
+            idx = _applemail_rotation_counter % len(self._accounts)
+            _applemail_rotation_counter += 1
+        self._selected = self._accounts[idx]
+        email = self._selected["email"]
+        self._log(f"[AppleMail] 使用账号 {email}（第 {idx + 1} 个）")
+        self._clear_mailbox(self._selected)
+        return MailboxAccount(email=email, account_id=email)
+
+    def _session(self):
+        from curl_cffi import requests as cffi_requests
+        proxies = build_requests_proxy_config(self._proxy)
+        return cffi_requests.Session(proxies=proxies, impersonate="chrome")
+
+    def _clear_mailbox(self, account: dict):
+        session = self._session()
+        for endpoint in ("/api/process-inbox", "/api/process-junk"):
+            try:
+                session.get(
+                    f"{self._API_BASE}{endpoint}",
+                    params={
+                        "refresh_token": account["refresh_token"],
+                        "client_id": account["client_id"],
+                        "email": account["email"],
+                    },
+                    timeout=30,
+                )
+            except Exception:
+                pass
+
+    def _fetch_latest(self, account: dict, mailbox: str) -> dict:
+        try:
+            session = self._session()
+            resp = session.get(
+                f"{self._API_BASE}/api/mail-new",
+                params={
+                    "refresh_token": account["refresh_token"],
+                    "client_id": account["client_id"],
+                    "email": account["email"],
+                    "mailbox": mailbox,
+                    "response_type": "json",
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                return {}
+            data = resp.json()
+            if isinstance(data, dict):
+                inner = data.get("data")
+                return inner if isinstance(inner, dict) else {}
+            return {}
+        except Exception:
+            return {}
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        return set()
+
+    def wait_for_code(
+        self,
+        account: MailboxAccount,
+        keyword: str = "",
+        timeout: int = 120,
+        before_ids: set = None,
+        code_pattern: str = None,
+        **kwargs,
+    ) -> str:
+        import time
+
+        acc = next(
+            (a for a in self._accounts if a["email"].lower() == account.email.lower()),
+            self._selected or None,
+        )
+        if not acc:
+            raise RuntimeError(f"未找到 {account.email} 的 AppleMail 账号配置")
+
+        deadline = time.time() + timeout
+        time.sleep(5)
+        tried: set = set()
+
+        while time.time() < deadline:
+            for mailbox in ("INBOX", "Junk"):
+                msg = self._fetch_latest(acc, mailbox)
+                if not msg:
+                    continue
+                content = msg.get("text") or msg.get("subject") or ""
+                code = self._safe_extract(content, code_pattern)
+                if code and code not in tried:
+                    tried.add(code)
+                    self._log(f"[AppleMail] 从 {mailbox} 获取到验证码 {code}")
+                    return code
+            time.sleep(5)
+
+        raise TimeoutError(f"[AppleMail] 等待验证码超时 ({timeout}s)")
+
+    def remove_used_account(self):
+        """注册成功后从全局 applemail_accounts 配置中删除当前账号"""
+        if not self._selected:
+            return
+        email = self._selected["email"]
+        try:
+            from core.config_store import config_store
+            accounts_text = config_store.get("applemail_accounts", "") or ""
+            new_lines = [
+                line for line in accounts_text.split("\n")
+                if line.strip() and line.strip().split("----")[0].strip().lower() != email.lower()
+            ]
+            config_store.set("applemail_accounts", "\n".join(new_lines))
+            self._log(f"[AppleMail] 已从账号列表中移除 {email}")
+        except Exception as e:
+            self._log(f"[AppleMail] 移除账号失败: {e}")

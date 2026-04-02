@@ -26,6 +26,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
     { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
     { label: 'QQEmail (qqemail.eu.org)', value: 'qqemail' },
+    { label: '小苹果邮件 (AppleMail)', value: 'applemail' },
   ],
   maliapi_auto_domain_strategy: [
     { label: 'balanced', value: 'balanced' },

@@ -275,6 +275,9 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 if _proxy:
                     proxy_pool.report_success(_proxy)
                 _log(task_id, f"✓ 注册成功: {account.email}")
+                # AppleMail: 注册成功后从账号列表中删除该账号
+                if hasattr(_mailbox, "remove_used_account"):
+                    _mailbox.remove_used_account()
                 _save_task_log(req.platform, account.email, "success")
                 _auto_upload_integrations(task_id, saved_account or account)
                 cashier_url = (account.extra or {}).get("cashier_url", "")
