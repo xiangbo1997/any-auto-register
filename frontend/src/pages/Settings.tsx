@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal } from 'antd'
 import {
   SaveOutlined,
@@ -536,6 +536,48 @@ function CFWorkerDomainPoolSection({ form }: { form: any }) {
   )
 }
 
+function AppleMailSection({ form }: { form: any }) {
+  const accountsText: string = Form.useWatch('applemail_accounts', form) || ''
+
+  const emailOptions = useMemo(() => {
+    return accountsText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.includes('----'))
+      .map((line) => line.split('----')[0].trim())
+      .filter(Boolean)
+      .map((email) => ({ label: email, value: email }))
+  }, [accountsText])
+
+  return (
+    <Card
+      title="小苹果邮件服务 (AppleMail)"
+      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>用于 ChatGPT 登录时自动读取 OTP 验证码</span>}
+      style={{ marginBottom: 16 }}
+    >
+      <Form.Item
+        label="账号列表"
+        name="applemail_accounts"
+        extra="每行一个，格式：邮箱----密码----client_id----refresh_token"
+      >
+        <Input.TextArea
+          rows={6}
+          placeholder={`dqbetc30671d@outlook.com----password----9e5f94bc-...----M.C557_BL2...`}
+          style={{ fontFamily: 'monospace', fontSize: 12 }}
+        />
+      </Form.Item>
+      <Form.Item label="当前使用邮箱" name="applemail_active_email">
+        <Select
+          options={emailOptions}
+          placeholder={emailOptions.length ? '从上方账号中选择' : '请先在上方填入账号列表'}
+          allowClear
+          style={{ width: '100%' }}
+        />
+      </Form.Item>
+    </Card>
+  )
+}
+
 function SolverStatus() {
   const [running, setRunning] = useState<boolean | null>(null)
 
@@ -870,6 +912,7 @@ export default function Settings() {
               {currentTab.sections.map((section) => (
                 <ConfigSection key={section.title} section={section} />
               ))}
+              {activeTab === 'mailbox' ? <AppleMailSection form={form} /> : null}
               {activeTab === 'mailbox' ? <CFWorkerDomainPoolSection form={form} /> : null}
               <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
                 {saved ? '已保存 ✓' : '保存配置'}

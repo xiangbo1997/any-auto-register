@@ -72,6 +72,8 @@ CONFIG_KEYS = [
     "grok2api_quota",
     "kiro_manager_path",
     "kiro_manager_exe",
+    "applemail_accounts",
+    "applemail_active_email",
 ]
 
 

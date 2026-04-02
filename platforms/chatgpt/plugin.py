@@ -375,6 +375,21 @@ class ChatGPTPlatform(BasePlatform):
         ms_client_id = extra.get("ms_client_id") or extra.get("client_id", "")
         ms_refresh_token = extra.get("ms_refresh_token") or extra.get("refresh_token", "")
 
+        # 若账号自身无 MS 凭证，尝试从全局 applemail_accounts 配置中按 email 匹配
+        if not (ms_client_id and ms_refresh_token):
+            try:
+                from core.config_store import config_store
+                accounts_text = config_store.get("applemail_accounts", "")
+                active_email = config_store.get("applemail_active_email", "") or account.email
+                for line in (accounts_text or "").split("\n"):
+                    parts = line.strip().split("----")
+                    if len(parts) >= 4 and parts[0].strip().lower() == active_email.lower():
+                        ms_client_id = parts[2].strip()
+                        ms_refresh_token = parts[3].strip()
+                        break
+            except Exception:
+                pass
+
         device_id = str(uuid.uuid4())
         cfg = self.config.extra if self.config and self.config.extra else {}
 
