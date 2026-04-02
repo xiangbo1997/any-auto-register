@@ -30,6 +30,10 @@ def sync_account(account) -> list[dict[str, Any]]:
         a.id_token = extra.get("id_token", "")
         a.session_token = extra.get("session_token", "")
         a.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+        a.account_id = extra.get("account_id", "")
+        a.expired = extra.get("expired", "")
+        a.last_refresh = extra.get("last_refresh", "")
+        a.auth_file_complete = bool(extra.get("auth_file_complete", False))
         return a
 
     if platform == "chatgpt":

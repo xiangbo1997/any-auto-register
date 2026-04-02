@@ -48,6 +48,9 @@ class RegistrationResult:
     refresh_token: str = ""
     id_token: str = ""
     session_token: str = ""  # 会话令牌
+    expired: str = ""
+    last_refresh: str = ""
+    auth_file_complete: bool = False
     error_message: str = ""
     logs: list = None
     metadata: dict = None
@@ -65,6 +68,9 @@ class RegistrationResult:
             "refresh_token": self.refresh_token[:20] + "..." if self.refresh_token else "",
             "id_token": self.id_token[:20] + "..." if self.id_token else "",
             "session_token": self.session_token[:20] + "..." if self.session_token else "",
+            "expired": self.expired,
+            "last_refresh": self.last_refresh,
+            "auth_file_complete": self.auth_file_complete,
             "error_message": self.error_message,
             "logs": self.logs or [],
             "metadata": self.metadata or {},
@@ -846,6 +852,11 @@ class RegistrationEngine:
             result.access_token = token_info.get("access_token", "")
             result.refresh_token = token_info.get("refresh_token", "")
             result.id_token = token_info.get("id_token", "")
+            result.expired = token_info.get("expired", "")
+            result.last_refresh = token_info.get("last_refresh", "")
+            result.auth_file_complete = bool(
+                result.access_token and result.refresh_token and result.id_token
+            )
             result.password = self.password or ""  # 保存密码（已注册账号为空）
 
             # 设置来源标记

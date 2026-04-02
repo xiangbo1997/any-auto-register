@@ -154,32 +154,61 @@ def _get_config_value(key: str) -> str:
         return ""
 
 
-def generate_token_json(account) -> dict:
+def _get_account_extra(account) -> dict:
+    if hasattr(account, "get_extra"):
+        try:
+            extra = account.get_extra()
+            if isinstance(extra, dict):
+                return extra
+        except Exception:
+            pass
+    extra = getattr(account, "extra", {})
+    return extra if isinstance(extra, dict) else {}
+
+
+def _get_account_value(account, key: str, default=""):
+    value = getattr(account, key, None)
+    if value not in (None, ""):
+        return value
+    extra = _get_account_extra(account)
+    return extra.get(key, default)
+
+
+def generate_token_json(account, allow_compat_id_token: bool = False) -> dict:
     """
     生成 CPA 格式的 Token JSON。
     接受任意 duck-typed 对象（需有 email, access_token, refresh_token 属性），
     expired / account_id 从 JWT 自动解码，与 chatgpt_register 逻辑一致。
     """
-    email = getattr(account, "email", "")
-    access_token = getattr(account, "access_token", "")
-    refresh_token = getattr(account, "refresh_token", "")
-    id_token = getattr(account, "id_token", "")
-    if access_token and not id_token:
+    email = str(_get_account_value(account, "email", "") or "").strip()
+    access_token = str(_get_account_value(account, "access_token", "") or "").strip()
+    refresh_token = str(_get_account_value(account, "refresh_token", "") or "").strip()
+    id_token = str(_get_account_value(account, "id_token", "") or "").strip()
+    account_id = str(_get_account_value(account, "account_id", "") or "").strip()
+    expired_str = str(_get_account_value(account, "expired", "") or "").strip()
+    last_refresh = str(_get_account_value(account, "last_refresh", "") or "").strip()
+
+    if allow_compat_id_token and access_token and not id_token:
         id_token = _build_compat_id_token(access_token=access_token, email=email)
 
-    expired_str = ""
-    account_id = ""
-    if access_token:
+    if access_token and (not expired_str or not account_id):
         payload = _decode_jwt_payload(access_token)
         auth_info = _get_auth_info(payload)
-        account_id = auth_info.get("chatgpt_account_id", "")
-        exp_timestamp = payload.get("exp")
-        if isinstance(exp_timestamp, int) and exp_timestamp > 0:
+        if not account_id and id_token:
+            id_auth_info = _get_auth_info(_decode_jwt_payload(id_token))
+            account_id = str(id_auth_info.get("chatgpt_account_id", "") or "").strip()
+        if not account_id:
+            account_id = str(auth_info.get("chatgpt_account_id", "") or "").strip()
+        exp_timestamp = payload.get("exp") if not expired_str else None
+        if not expired_str and isinstance(exp_timestamp, int) and exp_timestamp > 0:
             exp_dt = datetime.fromtimestamp(
                 exp_timestamp, tz=timezone(timedelta(hours=8)))
             expired_str = exp_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
-    now = datetime.now(tz=timezone(timedelta(hours=8)))
+    if not last_refresh:
+        now = datetime.now(tz=timezone(timedelta(hours=8)))
+        last_refresh = now.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
     return {
         "type": "codex",
         "email": email,
@@ -187,7 +216,7 @@ def generate_token_json(account) -> dict:
         "id_token": id_token,
         "account_id": account_id,
         "access_token": access_token,
-        "last_refresh": now.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+        "last_refresh": last_refresh,
         "refresh_token": refresh_token,
     }
 

@@ -82,6 +82,10 @@ def build_chatgpt_sync_account(account: Any):
     obj.session_token = extra.get("session_token", "")
     obj.client_id = extra.get("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
     obj.cookies = extra.get("cookies", "")
+    obj.account_id = extra.get("account_id", "")
+    obj.expired = extra.get("expired", "")
+    obj.last_refresh = extra.get("last_refresh", "")
+    obj.auth_file_complete = bool(extra.get("auth_file_complete", False))
     return obj
 
 
@@ -90,6 +94,12 @@ def upload_chatgpt_account_to_cpa(account: Any, api_url: str | None = None, api_
         sync_account = build_chatgpt_sync_account(account)
         if not getattr(sync_account, "access_token", ""):
             return False, "账号缺少 access_token"
+        if not getattr(sync_account, "refresh_token", ""):
+            return False, "账号缺少 refresh_token，未获取到完整 OAuth tokens，跳过 CPA 上传"
+        if not getattr(sync_account, "id_token", ""):
+            return False, "账号缺少真实 id_token，未获取到完整 OAuth tokens，跳过 CPA 上传"
+        if not getattr(sync_account, "auth_file_complete", False):
+            return False, "账号尚未标记为完整 auth file，跳过 CPA 上传"
 
         from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
 

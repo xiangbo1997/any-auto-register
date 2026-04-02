@@ -5,13 +5,14 @@
 
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Callable
 
 from core.base_platform import AccountStatus
 from platforms.chatgpt.register import RegistrationResult
 
 from .chatgpt_client import ChatGPTClient
+from .oauth_client import OAuthClient
 from .utils import generate_random_name, generate_random_birthday
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,67 @@ class RegistrationEngineV2:
         ]
         return any(marker.lower() in text for marker in retriable_markers)
 
+    @staticmethod
+    def _decode_jwt_payload(token: str) -> dict:
+        import base64
+        import json
+
+        try:
+            parts = str(token or "").split(".")
+            if len(parts) < 2:
+                return {}
+            payload = parts[1]
+            padding = 4 - len(payload) % 4
+            if padding != 4:
+                payload += "=" * padding
+            return json.loads(base64.urlsafe_b64decode(payload))
+        except Exception:
+            return {}
+
+    @classmethod
+    def _build_auth_file_metadata(cls, oauth_tokens: dict) -> dict:
+        access_token = str(oauth_tokens.get("access_token") or "").strip()
+        id_token = str(oauth_tokens.get("id_token") or "").strip()
+        payload = cls._decode_jwt_payload(access_token)
+        id_payload = cls._decode_jwt_payload(id_token)
+        auth_info = id_payload.get("https://api.openai.com/auth") or payload.get("https://api.openai.com/auth") or {}
+        exp_timestamp = payload.get("exp")
+        expired = ""
+        if isinstance(exp_timestamp, int) and exp_timestamp > 0:
+            exp_dt = datetime.fromtimestamp(exp_timestamp, tz=timezone(timedelta(hours=8)))
+            expired = exp_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+        now = datetime.now(tz=timezone(timedelta(hours=8)))
+        return {
+            "account_id": str(auth_info.get("chatgpt_account_id") or auth_info.get("account_id") or "").strip(),
+            "expired": expired,
+            "last_refresh": now.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+            "auth_file_complete": bool(
+                access_token
+                and str(oauth_tokens.get("refresh_token") or "").strip()
+                and id_token
+            ),
+        }
+
+    def _login_and_get_oauth_tokens(self, email: str, password: str, device_id: str, skymail_client) -> dict | None:
+        client = OAuthClient(
+            config=self.extra_config,
+            proxy=self.proxy_url,
+            verbose=False,
+            browser_mode=self.browser_mode,
+        )
+        client._log = self._log
+        tokens = client.login_and_get_tokens(
+            email=email,
+            password=password,
+            device_id=device_id,
+            impersonate="chrome110",
+            skymail_client=skymail_client,
+        )
+        if not tokens:
+            self._log(f"OAuth 登录未拿到完整 tokens: {client.last_error or 'unknown error'}", "warning")
+        return tokens
+
     def run(self) -> RegistrationResult:
         result = RegistrationResult(success=False, logs=self.logs)
         try:
@@ -174,6 +236,31 @@ class RegistrationEngineV2:
                             "user": session_result.get("user") or {},
                             "account": session_result.get("account") or {},
                         }
+
+                        self._log("步骤 3/3: 获取真实 OAuth tokens 以生成完整 CPA auth file...")
+                        oauth_tokens = self._login_and_get_oauth_tokens(
+                            email=email_addr,
+                            password=pwd,
+                            device_id=chatgpt_client.device_id,
+                            skymail_client=skymail_adapter,
+                        )
+                        if oauth_tokens:
+                            auth_meta = self._build_auth_file_metadata(oauth_tokens)
+                            result.access_token = str(oauth_tokens.get("access_token") or result.access_token or "").strip()
+                            result.refresh_token = str(oauth_tokens.get("refresh_token") or "").strip()
+                            result.id_token = str(oauth_tokens.get("id_token") or "").strip()
+                            result.account_id = auth_meta["account_id"] or result.account_id
+                            result.expired = auth_meta["expired"]
+                            result.last_refresh = auth_meta["last_refresh"]
+                            result.auth_file_complete = bool(auth_meta["auth_file_complete"])
+                            result.metadata["oauth_tokens"] = {
+                                "expires_in": oauth_tokens.get("expires_in"),
+                                "scope": oauth_tokens.get("scope"),
+                                "token_type": oauth_tokens.get("token_type"),
+                            }
+                        else:
+                            result.auth_file_complete = False
+                            result.metadata["oauth_tokens"] = {"error": "missing_complete_oauth_tokens"}
 
                         if result.workspace_id:
                             self._log(f"Session Workspace ID: {result.workspace_id}")

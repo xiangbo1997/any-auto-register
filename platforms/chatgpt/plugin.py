@@ -513,16 +513,29 @@ class _OutlookOTPAdapter:
         if not self._ms_access_token:
             raise RuntimeError("Microsoft token 响应缺少 access_token")
 
-    def _read_inbox_otp(self, exclude_codes: set = None) -> str:
+    def _read_inbox_otp(self, exclude_codes: set = None, after_ts: float = None) -> str:
         import re
+        from datetime import datetime, timezone, timedelta
         from curl_cffi import requests as cffi_requests
         from core.proxy_utils import build_requests_proxy_config
 
+        # 只取最近 10 分钟内的邮件，且只看 OpenAI 发的
+        cutoff_dt = datetime.fromtimestamp(
+            after_ts if after_ts else (datetime.now(timezone.utc).timestamp() - 300),
+            tz=timezone.utc,
+        )
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         proxies = build_requests_proxy_config(self._proxy)
         session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
-        resp = session.get(
+        url = (
             "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
-            "?$top=10&$orderby=receivedDateTime+desc&$select=subject,bodyPreview,body",
+            f"?$top=10&$orderby=receivedDateTime+desc"
+            f"&$filter=receivedDateTime+ge+{cutoff_str}"
+            "&$select=subject,bodyPreview,body,from,receivedDateTime"
+        )
+        resp = session.get(
+            url,
             headers={"Authorization": f"Bearer {self._ms_access_token}", "Accept": "application/json"},
             timeout=30,
         )
@@ -530,6 +543,10 @@ class _OutlookOTPAdapter:
             return ""
         exclude = (exclude_codes or set()) | self._used_codes
         for msg in resp.json().get("value", []):
+            # 只处理 OpenAI 发的邮件
+            sender = (msg.get("from") or {}).get("emailAddress", {}).get("address", "").lower()
+            if not any(d in sender for d in ("openai.com", "noreply")):
+                continue
             text = msg.get("bodyPreview", "") + " " + (msg.get("body") or {}).get("content", "")
             match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
             if match:
@@ -543,10 +560,12 @@ class _OutlookOTPAdapter:
     ) -> str:
         import time
         self._ensure_ms_token()
+        # 记录开始等待时间，只接受此后到达的邮件
+        wait_start = otp_sent_at if otp_sent_at else time.time()
         deadline = time.time() + timeout
-        time.sleep(5)
+        time.sleep(6)
         while time.time() < deadline:
-            code = self._read_inbox_otp(exclude_codes)
+            code = self._read_inbox_otp(exclude_codes, after_ts=wait_start - 30)
             if code:
                 self._used_codes.add(code)
                 return code
