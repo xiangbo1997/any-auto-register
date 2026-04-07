@@ -1855,7 +1855,7 @@ class AppleMailMailbox(BaseMailbox):
         session = self._session()
         for endpoint in ("/api/process-inbox", "/api/process-junk"):
             try:
-                session.get(
+                resp = session.get(
                     f"{self._API_BASE}{endpoint}",
                     params={
                         "refresh_token": account["refresh_token"],
@@ -1864,8 +1864,23 @@ class AppleMailMailbox(BaseMailbox):
                     },
                     timeout=30,
                 )
-            except Exception:
-                pass
+                self._log(f"[AppleMail] 清空 {endpoint}: HTTP {resp.status_code}")
+            except Exception as e:
+                self._log(f"[AppleMail] 清空 {endpoint} 异常: {e}")
+
+    def _pick_latest_mail(self, items: list[dict]) -> dict:
+        valid_items = [item for item in (items or []) if isinstance(item, dict)]
+        if not valid_items:
+            return {}
+
+        dated_items = [item for item in valid_items if item.get("date")]
+        if not dated_items:
+            return valid_items[0]
+
+        try:
+            return max(dated_items, key=lambda item: str(item.get("date") or ""))
+        except Exception:
+            return dated_items[0]
 
     def _fetch_latest(self, account: dict, mailbox: str) -> dict:
         try:
@@ -1882,13 +1897,23 @@ class AppleMailMailbox(BaseMailbox):
                 timeout=30,
             )
             if resp.status_code != 200:
+                self._log(f"[AppleMail] {mailbox} HTTP {resp.status_code}: {resp.text[:200]}")
                 return {}
             data = resp.json()
             if isinstance(data, dict):
                 inner = data.get("data")
-                return inner if isinstance(inner, dict) else {}
+                if inner and isinstance(inner, dict):
+                    return inner
+                if isinstance(inner, list):
+                    return self._pick_latest_mail(inner)
+                if not data.get("success", True):
+                    self._log(f"[AppleMail] {mailbox} 无新邮件: {data.get('msg', '')}")
+                return {}
+            if isinstance(data, list):
+                return self._pick_latest_mail(data)
             return {}
-        except Exception:
+        except Exception as e:
+            self._log(f"[AppleMail] {mailbox} 请求异常: {e}")
             return {}
 
     def get_current_ids(self, account: MailboxAccount) -> set:
@@ -1915,6 +1940,7 @@ class AppleMailMailbox(BaseMailbox):
         deadline = time.time() + timeout
         time.sleep(5)
         tried: set = set()
+        poll_count = 0
 
         while time.time() < deadline:
             for mailbox in ("INBOX", "Junk"):
@@ -1927,6 +1953,10 @@ class AppleMailMailbox(BaseMailbox):
                     tried.add(code)
                     self._log(f"[AppleMail] 从 {mailbox} 获取到验证码 {code}")
                     return code
+            poll_count += 1
+            if poll_count % 3 == 0:
+                remaining = int(deadline - time.time())
+                self._log(f"[AppleMail] 等待验证码中... 剩余 {remaining}s")
             time.sleep(5)
 
         raise TimeoutError(f"[AppleMail] 等待验证码超时 ({timeout}s)")

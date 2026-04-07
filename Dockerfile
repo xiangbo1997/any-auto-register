@@ -35,7 +35,10 @@ WORKDIR /app
 COPY requirements.txt ./
 COPY scripts/install_camoufox.py /tmp/install_camoufox.py
 
-RUN pip install --upgrade pip \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgtk-3-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --upgrade pip \
     && pip install -r requirements.txt \
     && installed=0 \
     && for attempt in 1 2 3; do \

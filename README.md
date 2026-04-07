@@ -163,6 +163,14 @@ D:\codemodule\ai\any-auto-register\static
 docker compose up -d --build
 ```
 
+如果宿主机只有 `docker-compose 1.x`，建议改用仓库脚本：
+
+```bash
+bash scripts/deploy_docker.sh
+```
+
+这个脚本会优先使用 `docker compose`；如果检测到旧版 `docker-compose 1.x`，会自动走 `down -> up -d --build`，规避已知的 `ContainerConfig` 重建异常。
+
 首次构建会额外下载 Python 依赖、Playwright Chromium 和 Camoufox，耗时会明显更长。
 
 当前 Dockerfile 已改为通过固定直链安装 Camoufox，避免构建时访问 GitHub Releases API 触发匿名限流。
