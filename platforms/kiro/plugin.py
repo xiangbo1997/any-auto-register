@@ -139,6 +139,7 @@ class KiroPlatform(BasePlatform):
                     mail_provider = mailbox_extra.get("mail_provider", "")
                     if mail_provider:
                         try:
+                            mailbox_extra["mailbox_service_enabled"] = "1"
                             mailbox = create_mailbox(
                                 provider=mail_provider,
                                 extra=mailbox_extra,

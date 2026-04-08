@@ -245,11 +245,25 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     password=req.password,
                 )
                 if isinstance(account.extra, dict):
+                    provider_meta = {}
+                    if hasattr(_mailbox, "get_provider_meta"):
+                        try:
+                            provider_meta = _mailbox.get_provider_meta() or {}
+                        except Exception:
+                            provider_meta = {}
+                    if isinstance(provider_meta, dict):
+                        for key, value in provider_meta.items():
+                            if value not in (None, ""):
+                                account.extra.setdefault(key, value)
                     mail_provider = merged_extra.get("mail_provider", "")
                     if mail_provider:
                         account.extra.setdefault("mail_provider", mail_provider)
                     if mail_provider == "luckmail" and req.platform == "chatgpt":
-                        mailbox_token = getattr(_mailbox, "_token", "") or ""
+                        mailbox_token = (
+                            account.extra.get("mailbox_token")
+                            or getattr(_mailbox, "_token", "")
+                            or ""
+                        )
                         if mailbox_token:
                             account.extra.setdefault("mailbox_token", mailbox_token)
                         if merged_extra.get("luckmail_project_code"):
@@ -275,8 +289,10 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 if _proxy:
                     proxy_pool.report_success(_proxy)
                 _log(task_id, f"✓ 注册成功: {account.email}")
+                if hasattr(_mailbox, "complete_success"):
+                    _mailbox.complete_success()
                 # AppleMail: 注册成功后从账号列表中删除该账号
-                if hasattr(_mailbox, "remove_used_account"):
+                elif hasattr(_mailbox, "remove_used_account"):
                     _mailbox.remove_used_account()
                 _save_task_log(req.platform, account.email, "success")
                 _auto_upload_integrations(task_id, saved_account or account)
@@ -291,6 +307,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             except Exception as e:
                 if _proxy:
                     proxy_pool.report_fail(_proxy)
+                if "_mailbox" in locals() and hasattr(_mailbox, "complete_failed"):
+                    try:
+                        _mailbox.complete_failed(str(e))
+                    except Exception:
+                        pass
                 _log(task_id, f"✗ 注册失败: {e}")
                 _save_task_log(req.platform, req.email or "", "failed", error=str(e))
                 return str(e)

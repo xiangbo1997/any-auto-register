@@ -74,6 +74,9 @@ CONFIG_KEYS = [
     "kiro_manager_exe",
     "applemail_accounts",
     "applemail_active_email",
+    "mailbox_service_enabled",
+    "mailbox_service_api_url",
+    "mailbox_service_api_key",
 ]
 
 

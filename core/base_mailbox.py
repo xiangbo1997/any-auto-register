@@ -1,6 +1,7 @@
 """邮箱池基类 - 抽象临时邮箱/收件服务"""
 
 import json
+import os
 import random
 import threading
 
@@ -106,7 +107,168 @@ class BaseMailbox(ABC):
         ...
 
 
+def _is_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+class MailboxServiceBackedMailbox(BaseMailbox):
+    """兼容旧平台调用面的邮箱服务适配器。"""
+
+    def __init__(self, provider: str, extra: dict | None = None, proxy: str = None):
+        self._provider = provider
+        self._extra = dict(extra or {})
+        self._proxy = proxy
+        self._leases_by_email: dict[str, Any] = {}
+        self._leases_by_session_id: dict[str, Any] = {}
+        self._last_session_id: str = ""
+        self._token: str = ""
+        self._order_no: str = ""
+        self._email: str = ""
+        self._provider_meta: dict[str, Any] = {}
+
+    @staticmethod
+    def _email_key(email: str) -> str:
+        return str(email or "").strip().lower()
+
+    def _service(self):
+        from services.mailbox_service import mailbox_service
+
+        return mailbox_service
+
+    def _remember_lease(self, lease):
+        key = self._email_key(lease.email)
+        if key:
+            self._leases_by_email[key] = lease
+        self._leases_by_session_id[lease.session_id] = lease
+        self._last_session_id = lease.session_id
+        self._provider_meta = dict(lease.provider_meta or {})
+        self._token = str(
+            self._provider_meta.get("mailbox_token")
+            or self._provider_meta.get("token")
+            or lease.account_id
+            or ""
+        )
+        self._order_no = str(self._provider_meta.get("mailbox_order_no") or "")
+        self._email = str(lease.email or self._provider_meta.get("allocated_email") or "")
+        return lease
+
+    def _resolve_lease(self, account: MailboxAccount | None):
+        if account and account.account_id and account.account_id in self._leases_by_session_id:
+            return self._leases_by_session_id[account.account_id]
+
+        key = self._email_key(account.email if account else "")
+        if key and key in self._leases_by_email:
+            return self._leases_by_email[key]
+
+        if self._last_session_id and self._last_session_id in self._leases_by_session_id:
+            return self._leases_by_session_id[self._last_session_id]
+
+        if account and account.email:
+            lease = self._service().acquire_session(
+                provider=self._provider,
+                extra=self._extra,
+                proxy=self._proxy,
+                purpose="compat-existing",
+                account_override=MailboxAccount(
+                    email=account.email,
+                    account_id=account.account_id or "",
+                    extra=account.extra,
+                ),
+            )
+            return self._remember_lease(lease)
+
+        raise RuntimeError("邮箱会话尚未创建，无法继续读取验证码")
+
+    def _complete(self, result: str, reason: str = "") -> None:
+        if not self._last_session_id:
+            return
+        lease = self._leases_by_session_id.get(self._last_session_id)
+        if not lease:
+            return
+        updated = self._service().complete_session(
+            session_id=lease.session_id,
+            lease_token=lease.lease_token,
+            result=result,
+            reason=reason,
+        )
+        self._remember_lease(updated)
+
+    def get_email(self) -> MailboxAccount:
+        lease = self._remember_lease(
+            self._service().acquire_session(
+                provider=self._provider,
+                extra=self._extra,
+                proxy=self._proxy,
+                purpose="register",
+            )
+        )
+        account_extra = dict(lease.provider_meta or {})
+        account_extra.setdefault("provider", lease.provider)
+        account_extra.setdefault("lease_token", lease.lease_token)
+        if self._provider == "luckmail" and lease.account_id:
+            account_extra.setdefault("mailbox_token", lease.account_id)
+        return MailboxAccount(
+            email=lease.email,
+            account_id=lease.session_id,
+            extra=account_extra or None,
+        )
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        lease = self._resolve_lease(account)
+        return {str(item) for item in (lease.before_ids or []) if str(item)}
+
+    def wait_for_code(
+        self,
+        account: MailboxAccount,
+        keyword: str = "",
+        timeout: int = 120,
+        before_ids: set = None,
+        code_pattern: str = None,
+        **kwargs,
+    ) -> str:
+        lease = self._resolve_lease(account)
+        poll_result = self._service().poll_code(
+            session_id=lease.session_id,
+            lease_token=lease.lease_token,
+            timeout_seconds=timeout,
+            keyword=keyword,
+            code_pattern=code_pattern,
+            otp_sent_at=kwargs.get("otp_sent_at"),
+            exclude_codes=set(kwargs.get("exclude_codes") or []),
+            before_ids=set(before_ids or lease.before_ids or []),
+        )
+        if poll_result.status == "ready" and poll_result.code:
+            return poll_result.code
+        if poll_result.error_code in {"INVALID_CREDENTIAL", "LEASE_EXPIRED"}:
+            raise RuntimeError(poll_result.message or poll_result.error_code)
+        raise TimeoutError(poll_result.message or f"等待验证码失败 ({poll_result.error_code})")
+
+    def complete_success(self) -> None:
+        self._complete("success")
+
+    def complete_failed(self, reason: str = "") -> None:
+        self._complete("failed", reason=reason)
+
+    def remove_used_account(self):
+        self.complete_success()
+
+    def get_provider_meta(self) -> dict[str, Any]:
+        return dict(self._provider_meta or {})
+
+
 def create_mailbox(
+    provider: str, extra: dict = None, proxy: str = None
+) -> "BaseMailbox":
+    extra = extra or {}
+    use_service = _is_truthy(extra.get("mailbox_service_enabled")) or _is_truthy(
+        os.getenv("MAILBOX_SERVICE_ENABLED", "")
+    )
+    if use_service:
+        return MailboxServiceBackedMailbox(provider=provider, extra=extra, proxy=proxy)
+    return create_local_mailbox(provider=provider, extra=extra, proxy=proxy)
+
+
+def create_local_mailbox(
     provider: str, extra: dict = None, proxy: str = None
 ) -> "BaseMailbox":
     """工厂方法：根据 provider 创建对应的 mailbox 实例"""
@@ -1897,7 +2059,11 @@ class AppleMailMailbox(BaseMailbox):
                 timeout=30,
             )
             if resp.status_code != 200:
-                self._log(f"[AppleMail] {mailbox} HTTP {resp.status_code}: {resp.text[:200]}")
+                message = resp.text[:200]
+                self._log(f"[AppleMail] {mailbox} HTTP {resp.status_code}: {message}")
+                lowered = message.lower()
+                if "invalid_grant" in lowered or "aadsts70000" in lowered:
+                    raise RuntimeError(f"[AppleMail] {mailbox} Microsoft 凭证已失效: invalid_grant")
                 return {}
             data = resp.json()
             if isinstance(data, dict):

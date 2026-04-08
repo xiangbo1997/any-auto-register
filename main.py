@@ -15,6 +15,7 @@ from api.proxies import router as proxies_router
 from api.config import router as config_router
 from api.actions import router as actions_router
 from api.integrations import router as integrations_router
+from api.mailbox_service import router as mailbox_service_router
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
 
@@ -54,6 +55,9 @@ def _print_runtime_info() -> None:
 async def lifespan(app: FastAPI):
     _print_runtime_info()
     init_db()
+    from services.mailbox_service import init_mailbox_service_db
+
+    init_mailbox_service_db()
     load_all()
     print("[OK] 数据库初始化完成")
     from core.registry import list_platforms
@@ -85,6 +89,7 @@ app.include_router(proxies_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
 app.include_router(actions_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
+app.include_router(mailbox_service_router, prefix="/api")
 
 
 @app.get("/api/solver/status")

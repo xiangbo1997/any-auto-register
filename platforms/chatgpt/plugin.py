@@ -375,31 +375,47 @@ class ChatGPTPlatform(BasePlatform):
         ms_client_id = extra.get("ms_client_id") or extra.get("client_id", "")
         ms_refresh_token = extra.get("ms_refresh_token") or extra.get("refresh_token", "")
 
-        # 若账号自身无 MS 凭证，尝试从全局 applemail_accounts 配置中按 email 匹配
-        if not (ms_client_id and ms_refresh_token):
-            try:
-                from core.config_store import config_store
-                accounts_text = config_store.get("applemail_accounts", "")
-                active_email = config_store.get("applemail_active_email", "") or account.email
-                for line in (accounts_text or "").split("\n"):
-                    parts = line.strip().split("----")
-                    if len(parts) >= 4 and parts[0].strip().lower() == active_email.lower():
-                        ms_client_id = parts[2].strip()
-                        ms_refresh_token = parts[3].strip()
-                        break
-            except Exception:
-                pass
-
         device_id = str(uuid.uuid4())
         cfg = self.config.extra if self.config and self.config.extra else {}
 
         logs = []
 
-        # 构造 Outlook OTP 适配器（如有 Microsoft 凭证）
+        mailbox_extra = {}
+        try:
+            from core.config_store import config_store
+
+            mailbox_extra = config_store.get_all().copy()
+        except Exception:
+            mailbox_extra = {}
+        mailbox_extra.update({k: v for k, v in cfg.items() if v not in (None, "")})
+        mailbox_extra.update({k: v for k, v in extra.items() if v not in (None, "")})
+
+        mail_provider = (
+            str(extra.get("mail_provider") or mailbox_extra.get("mail_provider") or "").strip()
+        )
+        if not mail_provider and (
+            ms_client_id
+            or ms_refresh_token
+            or str(mailbox_extra.get("applemail_accounts", "") or "").strip()
+        ):
+            mail_provider = "applemail"
+
+        # 构造基于邮箱服务的 OTP 适配器
         skymail = None
-        if ms_client_id and ms_refresh_token:
-            skymail = _OutlookOTPAdapter(
-                ms_client_id, ms_refresh_token, account.email, proxy,
+        if mail_provider:
+            mailbox_extra["mailbox_service_enabled"] = "1"
+            skymail = _MailboxServiceOTPAdapter(
+                provider=mail_provider,
+                extra=mailbox_extra,
+                email=account.email,
+                account_id=(
+                    extra.get("mailbox_token")
+                    or extra.get("mailbox_order_no")
+                    or extra.get("mailbox_account_id")
+                    or ""
+                ),
+                proxy=proxy,
+                account_extra=extra,
                 log_fn=lambda msg: logs.append(msg),
             )
             skymail.clear_inbox()
@@ -495,120 +511,69 @@ class ChatGPTPlatform(BasePlatform):
         return ""
 
 
-class _OutlookOTPAdapter:
-    """
-    OAuthClient.login_and_get_tokens 的 skymail_client 适配器。
-    通过 appleemail.top API 从 Outlook 收件箱读取 OTP 验证码。
-    """
+class _MailboxServiceOTPAdapter:
+    """OAuthClient/login 流程用的邮箱服务 OTP 适配器。"""
 
-    def __init__(self, client_id: str, refresh_token: str, email: str, proxy: str = None, log_fn=None):
-        self._client_id = client_id
-        self._refresh_token = refresh_token
+    def __init__(
+        self,
+        provider: str,
+        extra: dict,
+        email: str,
+        account_id: str = "",
+        proxy: str = None,
+        account_extra: dict | None = None,
+        log_fn=None,
+    ):
+        from core.base_mailbox import MailboxAccount
+        from services.mailbox_service import mailbox_service
+
+        self._provider = provider
+        self._extra = dict(extra or {})
         self._email = email
+        self._account_id = str(account_id or "")
         self._proxy = proxy
+        self._account_extra = dict(account_extra or {})
+        self._account = MailboxAccount(
+            email=self._email,
+            account_id=self._account_id,
+            extra=self._account_extra or None,
+        )
+        self._service = mailbox_service
+        self._lease = None
         self._used_codes: set = set()
-        self._api_base = "https://www.appleemail.top"
         self._log = log_fn or (lambda msg: None)
 
-    def _fetch_mailbox(self, email: str, mailbox: str) -> list:
-        from curl_cffi import requests as cffi_requests
-        from core.proxy_utils import build_requests_proxy_config
-
-        proxies = build_requests_proxy_config(self._proxy)
-        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
-        try:
-            resp = session.get(
-                f"{self._api_base}/api/mail-new",
-                params={
-                    "refresh_token": self._refresh_token,
-                    "client_id": self._client_id,
-                    "email": email,
-                    "mailbox": mailbox,
-                    "response_type": "json",
-                },
-                timeout=30,
-            )
-        except Exception as e:
-            self._log(f"[AppleMail] {mailbox} 请求异常: {e}")
-            return []
-        if resp.status_code != 200:
-            self._log(f"[AppleMail] {mailbox} HTTP {resp.status_code}: {resp.text[:100]}")
-            return []
-        data = resp.json()
-        # appleemail.top 返回格式: {"code":200,"success":true,"data":{...}}
-        if isinstance(data, dict):
-            inner = data.get("data")
-            if inner is not None:
-                return [inner] if isinstance(inner, dict) else (inner if isinstance(inner, list) else [])
-            return [data]
-        if isinstance(data, list):
-            return data
-        return []
-
-    def fetch_emails(self, email=None) -> list:
-        """查询 INBOX 和 Junk，OpenAI 验证邮件有时落到垃圾箱"""
-        target = email or self._email
-        results = []
-        for mailbox in ("INBOX", "Junk"):
-            msgs = self._fetch_mailbox(target, mailbox)
-            if msgs:
-                self._log(f"[AppleMail] {mailbox} 有 {len(msgs)} 封邮件")
-            results.extend(msgs)
-        return results
-
-    def extract_verification_code(self, content: str) -> str:
-        import re
-        match = re.search(r"(?<!\d)(\d{6})(?!\d)", content or "")
-        return match.group(1) if match else ""
-
-    def _read_inbox_otp(self, exclude_codes: set = None, after_ts: float = None) -> str:
-        exclude = (exclude_codes or set()) | self._used_codes
-        msgs = self.fetch_emails(self._email)
-        for msg in msgs:
-            content = (
-                msg.get("bodyPreview") or msg.get("body") or
-                msg.get("content") or msg.get("text") or ""
-            )
-            if isinstance(content, dict):
-                content = content.get("content", "")
-            code = self.extract_verification_code(str(content))
-            if code and code not in exclude:
-                return code
-        return ""
+    def _ensure_lease(self, force_new: bool = False):
+        if self._lease is not None and not force_new:
+            return self._lease
+        self._lease = self._service.acquire_session(
+            provider=self._provider,
+            extra=self._extra,
+            proxy=self._proxy,
+            purpose="chatgpt-login-otp",
+            account_override=self._account,
+        )
+        return self._lease
 
     def clear_inbox(self):
-        """登录前清空 INBOX 和 Junk，确保只接受此后新到的验证码"""
-        from curl_cffi import requests as cffi_requests
-        from core.proxy_utils import build_requests_proxy_config
-
-        proxies = build_requests_proxy_config(self._proxy)
-        session = cffi_requests.Session(proxies=proxies, impersonate="chrome")
-        for endpoint in ("/api/process-inbox", "/api/process-junk"):
-            try:
-                resp = session.get(
-                    f"{self._api_base}{endpoint}",
-                    params={
-                        "refresh_token": self._refresh_token,
-                        "client_id": self._client_id,
-                        "email": self._email,
-                    },
-                    timeout=30,
-                )
-                self._log(f"[AppleMail] 清空 {endpoint}: HTTP {resp.status_code}")
-            except Exception as e:
-                self._log(f"[AppleMail] 清空 {endpoint} 失败: {e}")
+        self._ensure_lease(force_new=True)
+        self._log(f"[MailboxService] 已准备 OTP 会话: provider={self._provider} email={self._email}")
 
     def wait_for_verification_code(
         self, email=None, timeout=90, otp_sent_at=None, exclude_codes=None
     ) -> str:
-        import time
-        wait_start = otp_sent_at if otp_sent_at else time.time()
-        deadline = time.time() + timeout
-        time.sleep(6)
-        while time.time() < deadline:
-            code = self._read_inbox_otp(exclude_codes, after_ts=wait_start - 30)
-            if code:
-                self._used_codes.add(code)
-                return code
-            time.sleep(5)
+        lease = self._ensure_lease()
+        result = self._service.poll_code(
+            session_id=lease.session_id,
+            lease_token=lease.lease_token,
+            timeout_seconds=timeout,
+            otp_sent_at=otp_sent_at,
+            exclude_codes=set(exclude_codes or set()) | self._used_codes,
+            before_ids=set(lease.before_ids or []),
+        )
+        if result.status == "ready" and result.code:
+            self._used_codes.add(result.code)
+            return result.code
+        if result.error_code:
+            self._log(f"[MailboxService] OTP 获取失败: {result.error_code} {result.message}")
         return ""
